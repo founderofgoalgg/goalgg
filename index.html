@@ -961,7 +961,9 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
   }
   function notify(title, body, tag) {
     let sys = false;
-    try { if (document.hidden && 'Notification' in window && Notification.permission === 'granted') { new Notification(title, { body, tag }); sys = true; } } catch { /* e.g. Android needs a service worker */ }
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      try { new Notification(title, { body, tag }); sys = true; } catch { /* e.g. Android needs a service worker */ }
+    }
     if (!sys) toast(title, body);
     try { navigator.vibrate && navigator.vibrate([120, 60, 120]); } catch {}
   }
@@ -1473,7 +1475,7 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
     }
   }
 
-  // Mini games: a penalty shoot-out against the bot, or against a friend over a peer-to-peer link (PeerJS, loaded only when needed).
+  // Mini games: a penalty shoot-out against the bot, or against a friend over an internet relay (loaded only when needed).
   // Drawn on a canvas; more games can join the same dialog later.
   const GT = {
     uz: { btn: "Mini o'yinlar", name: 'Penalti seriyasi', vs: 'Bot yoki do\'st bilan', you: 'Siz', bot: 'Bot', friend: "Do'st", close: 'Yopish',
@@ -1529,7 +1531,7 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
     try { rec = JSON.parse(store.get('gk-pk')) || { w: 0, p: 0 }; } catch { rec = { w: 0, p: 0 }; }
     // you/bot hold this player's and the opponent's kicks (true = scored); role is 'shooter' or 'keeper' in a friend match
     const s = { mode: 'bot', phase: 'idle', you: [], bot: [], anim: null, msg: null, aim: null, runup: 0, deadline: 0, role: null };
-    const NET = { peer: null, conn: null, host: false, round: null, timer: 0 };
+    const NET = { link: null, paired: false, host: false, round: null, timer: 0, beat: 0, seen: 0 };
 
     // Goal space: u runs -1..1 post to post, v runs 0..1 from the ground to the bar.
     const goal = () => { const w = W * .76, h = w * .34; return { x: (W - w) / 2, y: H * .2, w, h }; };
@@ -1582,7 +1584,9 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
     }
     function reset() { Object.assign(s, { you: [], bot: [], anim: null, msg: null, aim: null, role: null }); }
     function playKick(mine, u, v, ku, kv, res) {
-      s.anim = { t0: performance.now(), mine, u, v, ku, kv, res, done: false };
+      const a = s.anim = { t0: performance.now(), mine, u, v, ku, kv, res, done: false };
+      // settle on a timer too: drawing pauses when the page is in the background, the match must not
+      setTimeout(() => { if (!a.done && s.anim === a) { a.done = true; settle(); } }, 560);
       s.aim = null; s.phase = 'shot'; snd('kick'); paintHint();
     }
     function settle() {
@@ -1623,31 +1627,61 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
     }
 
     // ---- against a friend: the host runs the match and decides every kick; both screens animate the same result ----
-    function loadPeer() {
-      if (window.Peer) return Promise.resolve();
+    // Messages go through a public MQTT relay over a secure WebSocket, so it works on any network, mobile data included.
+    // (A direct WebRTC link fails behind many mobile and home routers.)
+    const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+    function loadMqtt() {
+      if (window.mqtt) return Promise.resolve();
       return new Promise((ok, no) => {
         const sc = document.createElement('script');
-        sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js';
-        sc.onload = () => window.Peer ? ok() : no(); sc.onerror = no; document.head.appendChild(sc);
+        sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js';
+        sc.onload = () => window.mqtt ? ok() : no(); sc.onerror = no; document.head.appendChild(sc);
       });
     }
-    const send = m => { try { if (NET.conn && NET.conn.open) NET.conn.send(m); } catch { /* the close handler deals with it */ } };
+    // Connects and subscribes to this player's inbox for the game; falls back to the next broker if one is down.
+    function connectRelay(code, host) {
+      const base = 'goalgg/pk/' + code, mine = base + (host ? '/h' : '/g'), theirs = base + (host ? '/g' : '/h');
+      const tryAt = i => new Promise((ok, no) => {
+        if (i >= BROKERS.length) return no(new Error('relay'));
+        const c = mqtt.connect(BROKERS[i], { connectTimeout: 7000, reconnectPeriod: 2000, clean: true });
+        let done = false;
+        const fail = () => { if (done) return; done = true; clearTimeout(timer); c.end(true); tryAt(i + 1).then(ok, no); };
+        const timer = setTimeout(fail, 8000);
+        c.on('connect', () => c.subscribe(mine, { qos: 1 }, err => { if (done) return; if (err) return fail(); done = true; clearTimeout(timer); ok(c); }));
+        c.on('error', fail);
+      });
+      return tryAt(0).then(c => ({ c, mine, theirs }));
+    }
+    const send = m => { try { if (NET.link) NET.link.c.publish(NET.link.theirs, JSON.stringify(m), { qos: 1 }); } catch { /* the heartbeat notices a dead link */ } };
     const lobbyText = (title, msg) => { $('g-inv-title').textContent = title; statusEl.textContent = msg; };
     function leaveOnline() {
-      clearTimeout(NET.timer);
-      const { conn, peer } = NET;
-      Object.assign(NET, { peer: null, conn: null, round: null });
-      try { conn && conn.close(); } catch {}
-      try { peer && peer.destroy(); } catch {}
+      clearTimeout(NET.timer); clearInterval(NET.beat);
+      const link = NET.link;
+      if (link && NET.paired) send({ t: 'bye' });
+      Object.assign(NET, { link: null, paired: false, round: null, seen: 0 });
+      if (link) setTimeout(() => { try { link.c.end(true); } catch {} }, 300);
       if (s.mode === 'online') s.mode = 'bot';
     }
     function netFail(msg) { leaveOnline(); reset(); s.phase = 'idle'; paintHint(); hint.textContent = msg; }
-    function wire(c) {
-      NET.conn = c;
-      c.on('open', () => { if (NET.host) onlineStart(); });
-      c.on('data', onMsg);
-      c.on('close', () => { if (NET.conn === c && s.mode === 'online') netFail(tx().left); });
-      c.on('error', () => {});
+    // Both sides ping every 4 s; 45 s of silence means the friend has gone (phones throttle timers in the background).
+    function paired() {
+      NET.paired = true; NET.seen = Date.now();
+      clearInterval(NET.beat);
+      NET.beat = setInterval(() => { send({ t: 'ping' }); if (Date.now() - NET.seen > 45000 && s.mode === 'online') netFail(tx().left); }, 4000);
+    }
+    function listen(link) {
+      NET.link = link;
+      link.c.on('message', (topic, buf) => {
+        if (NET.link !== link || topic !== link.mine) return;
+        let m; try { m = JSON.parse(buf.toString()); } catch { return; }
+        NET.seen = Date.now();
+        if (m.t === 'ping') return;
+        if (m.t === 'bye') { netFail(tx().left); return; }
+        if (m.t === 'join') { if (NET.host && !NET.paired) { paired(); onlineStart(); } return; }
+        if (!NET.host && !NET.paired) paired(); // any word from the host means we're in
+        if (m.t === 'ping') return;
+        onMsg(m);
+      });
     }
     async function hostLobby() {
       leaveOnline(); reset();
@@ -1655,35 +1689,33 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
       invite.classList.remove('guest'); $('g-link').value = ''; $('g-tg').removeAttribute('href');
       lobbyText(tx().invite, tx().making); paintHint();
       if (location.protocol === 'file:') return netFail(tx().onlyWeb);
-      try { await loadPeer(); } catch { return netFail(tx().onlyWeb); }
-      if (s.phase !== 'lobby') return;
-      const make = () => {
-        const code = Math.random().toString(36).slice(2, 8);
-        const peer = new Peer('goalgg-pk-' + code); NET.peer = peer;
-        peer.on('open', () => {
-          const link = location.origin + location.pathname + '#pk-' + code;
-          $('g-link').value = link;
-          $('g-tg').href = 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent(tx().shareText);
-          statusEl.textContent = tx().waiting;
-        });
-        peer.on('connection', c => { if (NET.conn) { c.on('open', () => c.close()); return; } wire(c); });
-        peer.on('error', e => {
-          if (e.type === 'unavailable-id') { peer.destroy(); make(); }
-          else if (!NET.conn && s.phase === 'lobby') netFail(tx().netErr);
-        });
-      };
-      make();
+      try { await loadMqtt(); } catch { return netFail(tx().onlyWeb); }
+      const code = Math.random().toString(36).slice(2, 10);
+      let link; try { link = await connectRelay(code, true); } catch { return netFail(tx().netErr); }
+      if (s.phase !== 'lobby' || !NET.host) { link.c.end(true); return; }
+      listen(link);
+      const url = location.origin + location.pathname + '#pk-' + code;
+      $('g-link').value = url;
+      $('g-tg').href = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(tx().shareText);
+      statusEl.textContent = tx().waiting;
     }
     async function joinGame(code) {
       open();
       leaveOnline(); reset();
       Object.assign(s, { mode: 'online', phase: 'lobby' }); NET.host = false;
       invite.classList.add('guest'); lobbyText(tx().joinTitle, tx().joining); paintHint();
-      try { await loadPeer(); } catch { return netFail(tx().onlyWeb); }
-      const peer = new Peer(); NET.peer = peer;
-      peer.on('open', () => wire(peer.connect('goalgg-pk-' + code, { reliable: true })));
-      peer.on('error', e => { if (s.phase === 'lobby') netFail(e.type === 'peer-unavailable' ? tx().notFound : tx().netErr); });
-      setTimeout(() => { if (s.mode === 'online' && s.phase === 'lobby' && NET.peer === peer) netFail(tx().notFound); }, 15000);
+      try { await loadMqtt(); } catch { return netFail(tx().onlyWeb); }
+      let link; try { link = await connectRelay(code, false); } catch { return netFail(tx().netErr); }
+      if (s.phase !== 'lobby' || NET.host) { link.c.end(true); return; }
+      listen(link);
+      // knock until the host answers with "start"; nobody home after 20 s means the game is gone
+      const t0 = Date.now();
+      const knock = () => {
+        if (NET.link !== link || NET.paired) return;
+        if (Date.now() - t0 > 20000) return netFail(tx().notFound);
+        send({ t: 'join' }); setTimeout(knock, 1500);
+      };
+      knock();
     }
     function onlineStart() { reset(); send({ t: 'start' }); snd('whistle'); hostRound(); }
     function hostRound() {
