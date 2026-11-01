@@ -491,6 +491,15 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
 .adm-bar { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 6px; font-size: 12px; color: #8e8a80 }
 .adm-bar b { color: #f4efe4; font-variant-numeric: tabular-nums }
 .adm-bar i { display: block; width: 100%; max-width: 44px; min-height: 3px; border-radius: 8px 8px 3px 3px; background: linear-gradient(#f6e2a8, #8c6a2c) }
+.adm-src { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.07); border-radius: 20px; padding: 8px 18px }
+.adm-src-h, .adm-src-r { display: grid; grid-template-columns: 1fr 72px 72px; gap: 8px; align-items: center; padding: 10px 0 }
+.adm-src-h { font: 800 11px var(--body); letter-spacing: .12em; text-transform: uppercase; color: #8e8a80; border-bottom: 1px solid rgba(255,255,255,.07) }
+.adm-src-h span, .adm-src-r b { text-align: right }
+.adm-src-r { border-bottom: 1px solid rgba(255,255,255,.05); font-size: 15px }
+.adm-src-r:last-child { border-bottom: 0 }
+.adm-src-r span { display: flex; flex-direction: column; gap: 6px }
+.adm-src-r i { display: block; height: 4px; min-width: 2px; border-radius: 2px; background: linear-gradient(90deg, #8c6a2c, #f6e2a8) }
+.adm-src-r b { font: 900 18px var(--display); color: #f6e2a8; font-variant-numeric: tabular-nums }
 .adm-foot { margin-top: 20px; font-size: 12px; color: #8e8a80; line-height: 1.6 }
 </style>
 
@@ -2012,10 +2021,22 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
   const minuteNow = () => Math.floor(Date.now() / 60000);
   const hit = key => fetch(`${STATS}/hit/${NS}/${key}`).catch(() => {});
   const dayId = k => 'd-' + k.replace(/-/g, '');
+  // Where a visit came from: in-app browsers name themselves in the user agent, other sites show up as the referrer.
+  const SOURCES = [['ig', 'Instagram'], ['tg', 'Telegram'], ['fb', 'Facebook'], ['tt', 'TikTok'], ['google', 'Google'], ['other', 'Boshqa saytlar'], ['direct', "To'g'ridan-to'g'ri"]];
+  function visitSource() {
+    const ua = navigator.userAgent, ref = document.referrer, q = location.search, utm = (new URLSearchParams(q).get('utm_source') || '').toLowerCase();
+    if (/Instagram/i.test(ua) || /instagram\./.test(ref) || /^(ig|instagram)/.test(utm)) return 'ig';
+    if (/Telegram/i.test(ua) || /(^|\/\/|\.)(t\.me|telegram\.)/.test(ref) || /^(tg|telegram)/.test(utm)) return 'tg';
+    if (/FBAN|FBAV|FB_IAB/.test(ua) || /facebook\.|fb\.com/.test(ref) || /[?&]fbclid=/.test(q) || /^(fb|facebook)/.test(utm)) return 'fb';
+    if (/tiktok|musical_ly|BytedanceWebview/i.test(ua) || /tiktok\./.test(ref) || /^tiktok/.test(utm)) return 'tt';
+    if (/google\./.test(ref)) return 'google';
+    if (ref && !ref.includes(location.hostname)) return 'other';
+    return 'direct';
+  }
   if (/(^|\.)goalgg\.com$/.test(location.hostname)) {
-    const day = todayKey;
-    if (!store.get('gk-seen')) { store.set('gk-seen', '1'); hit('users'); }
-    if (store.get('gk-day') !== day) { store.set('gk-day', day); hit(dayId(day)); }
+    const day = todayKey, src = visitSource();
+    if (!store.get('gk-seen')) { store.set('gk-seen', '1'); hit('users'); hit('s' + src); }
+    if (store.get('gk-day') !== day) { store.set('gk-day', day); hit(dayId(day)); hit('s' + src + '-' + dayId(day)); }
     hit('views'); hit('v' + dayId(day));
     // the last pinged minute is shared by all tabs and reloads, so one device counts once per minute
     const ping = () => { const m = minuteNow(); if (document.visibilityState === 'visible' && store.get('gk-ping') !== String(m)) { store.set('gk-ping', String(m)); hit('on-' + m); } };
@@ -2043,6 +2064,7 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
         <div class="adm-card"><div class="adm-k">Umumiy</div><div class="adm-v" id="aAll">\u2026</div><div class="adm-s" id="aAllV">foydalanuvchi</div></div>
       </div>
       <h3>So'nggi 7 kun</h3><div class="adm-bars" id="aBars"></div>
+      <h3>Qayerdan keldi</h3><div class="adm-src" id="aSrc"></div>
       <p class="adm-foot">Har 15 soniyada yangilanadi \u00b7 Oxirgi: <span id="aAt">\u2026</span><br>Bitta qurilma (telefon yoki kompyuter) bir marta sanaladi. Hisob 1-noyabr 2026 dan boshlangan.</p>
     </div>`;
     document.body.appendChild(el);
@@ -2062,6 +2084,10 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
         const v = per[i] || 0, [, mo, dd] = d.split('-');
         return `<div class="adm-bar"><b>${v}</b><i style="height:${Math.round(v / max * 100)}%"></i><span>${+dd}.${mo}</span></div>`;
       }).join('');
+      const src = await Promise.all(SOURCES.map(([k]) => Promise.all([getCount('s' + k + '-' + dayId(todayKey)), getCount('s' + k)])));
+      const srcMax = Math.max(1, ...src.map(([, all]) => all || 0));
+      document.getElementById('aSrc').innerHTML = `<div class="adm-src-h"><span></span><span>Bugun</span><span>Umumiy</span></div>` +
+        SOURCES.map(([, name], i) => `<div class="adm-src-r"><span>${name}<i style="width:${Math.round((src[i][1] || 0) / srcMax * 100)}%"></i></span><b>${fmt(src[i][0])}</b><b>${fmt(src[i][1])}</b></div>`).join('');
       document.getElementById('aAt').textContent = timeOf(new Date().toISOString());
     };
     load(); admTimer = setInterval(load, 15000);
