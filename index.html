@@ -2017,8 +2017,8 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
     if (!store.get('gk-seen')) { store.set('gk-seen', '1'); hit('users'); }
     if (store.get('gk-day') !== day) { store.set('gk-day', day); hit(dayId(day)); }
     hit('views'); hit('v' + dayId(day));
-    let lastPing = 0;
-    const ping = () => { const m = minuteNow(); if (document.visibilityState === 'visible' && m !== lastPing) { lastPing = m; hit('on-' + m); } };
+    // the last pinged minute is shared by all tabs and reloads, so one device counts once per minute
+    const ping = () => { const m = minuteNow(); if (document.visibilityState === 'visible' && store.get('gk-ping') !== String(m)) { store.set('gk-ping', String(m)); hit('on-' + m); } };
     ping(); setInterval(ping, 15000); document.addEventListener('visibilitychange', ping);
   }
 
