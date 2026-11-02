@@ -849,8 +849,18 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
     }
   };
   const savedLang = (() => { try { return localStorage.getItem('gk-lang'); } catch { return null; } })();
-  let L = I18N[savedLang] || I18N.uz;
-  let LANG = I18N[savedLang] ? savedLang : 'uz';
+  // Language: a ?lang= link (the ads use one) wins, then the visitor's own choice, then a guess from the device:
+  // phones in Uzbekistan open in Uzbek, everywhere else in the phone's language if we have it, otherwise English.
+  const urlLang = (new URLSearchParams(location.search).get('lang') || '').toLowerCase();
+  function guessLang() {
+    const langs = (navigator.languages || [navigator.language || '']).map(s => String(s).slice(0, 2).toLowerCase());
+    let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
+    if (langs[0] === 'uz' || /^Asia\/(Tashkent|Samarkand)$/.test(tz)) return 'uz';
+    return langs.find(l => I18N[l]) || 'en';
+  }
+  let LANG = I18N[urlLang] ? urlLang : I18N[savedLang] ? savedLang : guessLang();
+  let L = I18N[LANG];
+  if (I18N[urlLang]) { try { localStorage.setItem('gk-lang', urlLang); } catch {} }
   const lname = id => L.leagues[LEAGUE_IDS.indexOf(id)];
 
   const fmtDay = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -2022,10 +2032,10 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
   const hit = key => fetch(`${STATS}/hit/${NS}/${key}`).catch(() => {});
   const dayId = k => 'd-' + k.replace(/-/g, '');
   // Where a visit came from: in-app browsers name themselves in the user agent, other sites show up as the referrer.
-  const SOURCES = [['ig', 'Instagram'], ['tg', 'Telegram'], ['fb', 'Facebook'], ['tt', 'TikTok'], ['google', 'Google'], ['other', 'Boshqa saytlar'], ['direct', "To'g'ridan-to'g'ri"]];
+  const SOURCES = [['ig', 'Instagram'], ['igen', 'Instagram (EN reklama)'], ['tg', 'Telegram'], ['fb', 'Facebook'], ['tt', 'TikTok'], ['google', 'Google'], ['other', 'Boshqa saytlar'], ['direct', "To'g'ridan-to'g'ri"]];
   function visitSource() {
     const ua = navigator.userAgent, ref = document.referrer, q = location.search, utm = (new URLSearchParams(q).get('utm_source') || '').toLowerCase();
-    if (/Instagram/i.test(ua) || /instagram\./.test(ref) || /^(ig|instagram)/.test(utm)) return 'ig';
+    if (/Instagram/i.test(ua) || /instagram\./.test(ref) || /^(ig|instagram)/.test(utm)) return /[?&]lang=en\b/i.test(q) ? 'igen' : 'ig';
     if (/Telegram/i.test(ua) || /(^|\/\/|\.)(t\.me|telegram\.)/.test(ref) || /^(tg|telegram)/.test(utm)) return 'tg';
     if (/FBAN|FBAV|FB_IAB/.test(ua) || /facebook\.|fb\.com/.test(ref) || /[?&]fbclid=/.test(q) || /^(fb|facebook)/.test(utm)) return 'fb';
     if (/tiktok|musical_ly|BytedanceWebview/i.test(ua) || /tiktok\./.test(ref) || /^tiktok/.test(utm)) return 'tt';
