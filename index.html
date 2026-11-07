@@ -850,13 +850,17 @@ footer { margin-top: 36px; font-size: 11.5px; color: var(--muted); letter-spacin
   };
   const savedLang = (() => { try { return localStorage.getItem('gk-lang'); } catch { return null; } })();
   // Language: a ?lang= link (the ads use one) wins, then the visitor's own choice, then a guess from the device:
-  // phones in Uzbekistan open in Uzbek, everywhere else in the phone's language if we have it, otherwise English.
+  // phones set to Uzbek or Russian open in that language; English phones open in English unless their region
+  // (or, with no region, their clock) is Uzbekistan; anything else follows the clock, then English.
   const urlLang = (new URLSearchParams(location.search).get('lang') || '').toLowerCase();
   function guessLang() {
-    const langs = (navigator.languages || [navigator.language || '']).map(s => String(s).slice(0, 2).toLowerCase());
+    const prefs = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || '']).map(s => String(s).toLowerCase());
+    const [lang, region = ''] = prefs[0].split('-');
     let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
-    if (langs[0] === 'uz' || /^Asia\/(Tashkent|Samarkand)$/.test(tz)) return 'uz';
-    return langs.find(l => I18N[l]) || 'en';
+    const inUz = region ? region === 'uz' : /^Asia\/(Tashkent|Samarkand)$/.test(tz);
+    if (lang === 'uz' || lang === 'ru') return lang;
+    if (lang === 'en') return inUz ? 'uz' : 'en';
+    return inUz ? 'uz' : (prefs.map(s => s.slice(0, 2)).find(l => I18N[l]) || 'en');
   }
   let LANG = I18N[urlLang] ? urlLang : I18N[savedLang] ? savedLang : guessLang();
   let L = I18N[LANG];
